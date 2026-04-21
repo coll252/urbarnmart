@@ -42,7 +42,7 @@ const dbConfig = {
 
 if (process.env.DATABASE_URL) {
     dbConfig.uri = process.env.DATABASE_URL;
-    dbConfig.ssl = { rejectUnauthorized: true }; // Required for Aiven
+    dbConfig.ssl = { rejectUnauthorized: false }; // FIXED: Must be false for Aiven's self-signed certs
 } else {
     dbConfig.host = process.env.DB_HOST;
     dbConfig.user = process.env.DB_USER;
