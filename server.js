@@ -212,3 +212,29 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 module.exports = app;
+// ... (previous code above)
+
+// ---------------------------------------------------------
+// Startup Logic
+// ---------------------------------------------------------
+const PORT = process.env.PORT || 3000;
+
+async function startServer() {
+  try {
+    // Phase 0: Initialize Database first
+    await initializeDatabase();
+
+    // Phase 1: Start listening on the port required by the host
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`✅ UrbanMart Pro API is live on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error('❌ Critical failure during startup:', err);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+// For Vercel compatibility
+module.exports = app;
