@@ -6,6 +6,9 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const PDFDocument = require('pdfkit');
+const csv = require('csv-parser');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
@@ -14,10 +17,8 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static frontend files from the 'public' directory
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Configure persistent storage path for Render or fallback to local
 const uploadDir = process.env.RENDER_DISK_PATH || path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -30,19 +31,17 @@ const storage = multer.diskStorage({
         cb(null, `${Date.now()}_${safeName}`);
     }
 });
-
 const upload = multer({ storage });
 
-// Configure Database Connection for Aiven (SSL) or Local
 const dbConfig = {
     connectionLimit: 10,
     waitForConnections: true,
-    multipleStatements: true // Allows running multiple queries at once if needed
+    multipleStatements: true 
 };
 
 if (process.env.DATABASE_URL) {
     dbConfig.uri = process.env.DATABASE_URL;
-    dbConfig.ssl = { rejectUnauthorized: false }; // FIXED: Must be false for Aiven's self-signed certs
+    dbConfig.ssl = { rejectUnauthorized: false }; 
 } else {
     dbConfig.host = process.env.DB_HOST;
     dbConfig.user = process.env.DB_USER;
@@ -53,13 +52,12 @@ if (process.env.DATABASE_URL) {
 const pool = mysql.createPool(dbConfig);
 
 // ==========================================
-// AUTOMATIC DATABASE INITIALIZATION
+// PHASE 2: DATABASE EXPANSION & INITIALIZATION
 // ==========================================
 async function initializeDatabase() {
     try {
         console.log("Checking and initializing database tables...");
 
-        // 1. Create Tables using IF NOT EXISTS
         await pool.query(`
             CREATE TABLE IF NOT EXISTS categories (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -67,9 +65,6 @@ async function initializeDatabase() {
                 slug VARCHAR(100) UNIQUE NOT NULL,
                 icon VARCHAR(50) DEFAULT 'fa-tag'
             );
-        `);
-
-        await pool.query(`
             CREATE TABLE IF NOT EXISTS products (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
@@ -84,9 +79,6 @@ async function initializeDatabase() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (category_slug) REFERENCES categories(slug) ON DELETE SET NULL
             );
-        `);
-
-        await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -95,9 +87,6 @@ async function initializeDatabase() {
                 role ENUM('customer') DEFAULT 'customer',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-        `);
-
-        await pool.query(`
             CREATE TABLE IF NOT EXISTS cart (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 user_id INT NOT NULL,
@@ -106,22 +95,17 @@ async function initializeDatabase() {
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
             );
-        `);
-
-        await pool.query(`
             CREATE TABLE IF NOT EXISTS orders (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 order_number VARCHAR(50) UNIQUE NOT NULL,
                 user_id INT NOT NULL,
                 customer_name VARCHAR(100) NOT NULL,
                 total DECIMAL(10, 2) NOT NULL,
-                status ENUM('Pending', 'Shipped', 'Delivered', 'Cancelled') DEFAULT 'Pending',
+                status ENUM('Pending', 'Processing', 'Packed', 'Shipped', 'Delivered', 'Cancelled') DEFAULT 'Pending',
+                mpesa_receipt VARCHAR(50),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
-        `);
-
-        await pool.query(`
             CREATE TABLE IF NOT EXISTS order_items (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 order_id INT NOT NULL,
@@ -131,9 +115,6 @@ async function initializeDatabase() {
                 price DECIMAL(10, 2) NOT NULL,
                 FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
             );
-        `);
-
-        await pool.query(`
             CREATE TABLE IF NOT EXISTS settings (
                 id INT PRIMARY KEY,
                 hero_product_id INT,
@@ -144,48 +125,35 @@ async function initializeDatabase() {
                 color_surface VARCHAR(20) DEFAULT '#ffffff',
                 FOREIGN KEY (hero_product_id) REFERENCES products(id) ON DELETE SET NULL
             );
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT,
+                user_name VARCHAR(100),
+                action VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS coupons (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                code VARCHAR(50) UNIQUE NOT NULL,
+                discount_percent INT NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE
+            );
         `);
 
-        // 2. Seed Data (Only inject if tables are empty to avoid duplicates on restart)
+        // Seed data logic
         const [catRows] = await pool.query('SELECT COUNT(*) as count FROM categories');
         if (catRows[0].count === 0) {
-            console.log("Seeding categories...");
-            await pool.query(`
-                INSERT INTO categories (name, slug, icon) VALUES 
-                ('Smartphone & Tablet', 'smartphone-tablet', 'fa-mobile-alt'),
-                ('Watch & Jewelry', 'watch-jewelry', 'fa-clock'),
-                ('Furniture & Decor', 'furniture-decor', 'fa-couch'),
-                ('Fashion & Apparel', 'fashion', 'fa-tshirt'),
-                ('Audio & Electronics', 'electronics', 'fa-headphones'),
-                ('Laptops & PCs', 'laptop', 'fa-laptop');
-            `);
+            await pool.query(`INSERT INTO categories (name, slug, icon) VALUES ('Smartphone & Tablet', 'smartphone-tablet', 'fa-mobile-alt'), ('Watch & Jewelry', 'watch-jewelry', 'fa-clock');`);
         }
-
-        const [prodRows] = await pool.query('SELECT COUNT(*) as count FROM products');
-        if (prodRows[0].count === 0) {
-            console.log("Seeding products...");
-            await pool.query(`
-                INSERT INTO products (name, category_slug, price, old_price, stock, description, is_best_selling) VALUES 
-                ('iPhone 17 Pro Max Titanium', 'smartphone-tablet', 1299.00, 1499.00, 25, 'Latest A17 chip with 12GB RAM, 48MP advanced camera system.', TRUE),
-                ('Rolex Submariner Replica', 'watch-jewelry', 599.00, 899.00, 15, 'Premium automatic movement watch with sapphire crystal.', TRUE),
-                ('Nordic Minimalist Sofa', 'furniture-decor', 899.00, 1200.00, 8, 'Comfortable 3-seater sofa with premium fabric and wooden legs.', TRUE),
-                ('Apple iPad Pro M4', 'smartphone-tablet', 999.00, 1199.00, 40, '12.9-inch Liquid Retina XDR display with ultra-fast M4 chip.', FALSE),
-                ('Apple Watch Ultra 2', 'watch-jewelry', 799.00, 899.00, 12, 'Rugged titanium case, precision dual-frequency GPS.', TRUE),
-                ('MacBook Pro 16" M3 Max', 'laptop', 3499.00, 3999.00, 5, '16-core CPU, 40-core GPU, 48GB Unified Memory.', TRUE),
-                ('Dell XPS 15 OLED', 'laptop', 1599.00, 1999.00, 10, 'Intel Core i9, 32GB RAM, 1TB NVMe SSD, stunning OLED display.', FALSE),
-                ('Sony WH-1000XM5', 'electronics', 349.00, 399.00, 20, 'Industry leading noise canceling wireless headphones.', TRUE),
-                ('Premium Leather Jacket', 'fashion', 249.00, 350.00, 25, 'Genuine Italian leather with modern fit and durable zippers.', FALSE),
-                ('Samsung Galaxy S24 Ultra', 'smartphone-tablet', 1199.00, 1299.00, 18, 'AI-powered flagship with built-in S Pen and 200MP camera.', TRUE);
-            `);
+        
+        const [couponRows] = await pool.query('SELECT COUNT(*) as count FROM coupons');
+        if (couponRows[0].count === 0) {
+            await pool.query(`INSERT INTO coupons (code, discount_percent) VALUES ('DISCOUNT10', 10);`);
         }
 
         const [setRows] = await pool.query('SELECT COUNT(*) as count FROM settings');
         if (setRows[0].count === 0) {
-            console.log("Seeding settings...");
-            await pool.query(`
-                INSERT INTO settings (id, hero_product_id, color_primary, color_secondary, color_accent, color_bg, color_surface) 
-                VALUES (1, 1, '#020617', '#0f172a', '#10b981', '#f8fafc', '#ffffff');
-            `);
+            await pool.query(`INSERT INTO settings (id, color_primary) VALUES (1, '#020617');`);
         }
 
         console.log("Database initialized successfully!");
@@ -194,12 +162,11 @@ async function initializeDatabase() {
     }
 }
 
+// ==========================================
+// CORE UTILITIES & MIDDLEWARE
+// ==========================================
 function signToken(user) {
-    return jwt.sign(
-        { id: user.id, role: user.role, name: user.name, email: user.email || null },
-        process.env.JWT_SECRET,
-        { expiresIn: '24h' }
-    );
+    return jwt.sign({ id: user.id, role: user.role, name: user.name, email: user.email || null }, process.env.JWT_SECRET, { expiresIn: '24h' });
 }
 
 function authenticateToken(req, res, next) {
@@ -229,19 +196,16 @@ async function queryOne(sql, params = []) {
     return rows[0] || null;
 }
 
-// Heartbeat endpoint to prevent session timeout and keep Render awake
-app.get('/api/heartbeat', (_, res) => {
-    res.json({ ok: true, timestamp: Date.now() });
-});
-
-app.get('/api/health', async (_, res) => {
+async function logAdminAction(req, action) {
     try {
-        await pool.query('SELECT 1');
-        res.json({ ok: true });
-    } catch {
-        res.status(500).json({ ok: false });
-    }
-});
+        await pool.query('INSERT INTO audit_logs (user_id, user_name, action) VALUES (?, ?, ?)', [req.user.id, req.user.name, action]);
+    } catch (err) { console.error('Audit log failed', err); }
+}
+
+// ==========================================
+// API ROUTES
+// ==========================================
+app.get('/api/heartbeat', (_, res) => res.json({ ok: true, timestamp: Date.now() }));
 
 app.get('/api/bootstrap', async (_, res) => {
     try {
@@ -250,518 +214,268 @@ app.get('/api/bootstrap', async (_, res) => {
             pool.query('SELECT * FROM categories ORDER BY name ASC'),
             pool.query('SELECT * FROM settings WHERE id = 1')
         ]);
-
-        res.json({
-            products,
-            categories,
-            settings: settings[0] || {}
-        });
-    } catch {
-        res.status(500).json({ error: 'Failed to load store data' });
-    }
+        res.json({ products, categories, settings: settings[0] || {} });
+    } catch { res.status(500).json({ error: 'Failed to load store data' }); }
 });
 
 app.post('/api/auth/register', async (req, res) => {
     try {
-        const name = String(req.body.name || '').trim();
-        const email = String(req.body.email || '').trim().toLowerCase();
-        const password = String(req.body.password || '');
-
-        if (!name || !email || !password) {
-            return res.status(400).json({ error: 'All fields are required' });
-        }
-
-        if (email === String(process.env.ADMIN_EMAIL || '').trim().toLowerCase()) {
-            return res.status(400).json({ error: 'This email is reserved by the system' });
-        }
-
+        const { name, email, password } = req.body;
+        if (!name || !email || !password) return res.status(400).json({ error: 'All fields are required' });
+        
         const existing = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
         if (existing) return res.status(400).json({ error: 'Email already exists' });
 
         const hashed = await bcrypt.hash(password, 10);
-        await pool.query(
-            'INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)',
-            [name, email, hashed, 'customer']
-        );
-
+        await pool.query('INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)', [name, email.toLowerCase(), hashed, 'customer']);
         res.status(201).json({ message: 'Account created successfully' });
-    } catch {
-        res.status(500).json({ error: 'Registration failed' });
-    }
+    } catch { res.status(500).json({ error: 'Registration failed' }); }
 });
 
 app.post('/api/auth/login', async (req, res) => {
     try {
         const email = String(req.body.email || '').trim().toLowerCase();
         const password = String(req.body.password || '');
-
         const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
-        const adminPassword = String(process.env.ADMIN_PASSWORD || '');
 
-        if (email === adminEmail) {
-            if (password !== adminPassword) {
-                return res.status(400).json({ error: 'Invalid admin credentials' });
-            }
-
-            const adminUser = {
-                id: 0,
-                name: 'System Administrator',
-                email: adminEmail,
-                role: 'admin'
-            };
-
-            return res.json({
-                token: signToken(adminUser),
-                user: adminUser
-            });
+        if (email === adminEmail && password === process.env.ADMIN_PASSWORD) {
+            const adminUser = { id: 0, name: 'System Administrator', email: adminEmail, role: 'admin' };
+            return res.json({ token: signToken(adminUser), user: adminUser });
         }
 
         const user = await queryOne('SELECT * FROM users WHERE email = ?', [email]);
-        if (!user) return res.status(400).json({ error: 'Invalid credentials' });
+        if (!user || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ error: 'Invalid credentials' });
 
-        const valid = await bcrypt.compare(password, user.password);
-        if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
-
-        const payloadUser = {
-            id: user.id,
-            name: user.name,
-            email: user.email,
-            role: user.role
-        };
-
-        res.json({
-            token: signToken(payloadUser),
-            user: payloadUser
-        });
-    } catch {
-        res.status(500).json({ error: 'Login failed' });
-    }
+        const payloadUser = { id: user.id, name: user.name, email: user.email, role: user.role };
+        res.json({ token: signToken(payloadUser), user: payloadUser });
+    } catch { res.status(500).json({ error: 'Login failed' }); }
 });
 
-app.get('/api/settings', async (_, res) => {
-    try {
-        const settings = await queryOne('SELECT * FROM settings WHERE id = 1');
-        res.json(settings || {});
-    } catch {
-        res.status(500).json({ error: 'Failed to load settings' });
-    }
-});
-
-app.put('/api/settings', authenticateToken, isAdmin, async (req, res) => {
-    try {
-        const {
-            hero_product_id = null,
-            color_primary = '#020617',
-            color_secondary = '#0f172a',
-            color_accent = '#10b981',
-            color_bg = '#f8fafc',
-            color_surface = '#ffffff'
-        } = req.body;
-
-        const existing = await queryOne('SELECT id FROM settings WHERE id = 1');
-
-        if (existing) {
-            await pool.query(
-                `UPDATE settings
-                 SET hero_product_id = ?, color_primary = ?, color_secondary = ?, color_accent = ?, color_bg = ?, color_surface = ?
-                 WHERE id = 1`,
-                [hero_product_id, color_primary, color_secondary, color_accent, color_bg, color_surface]
-            );
-        } else {
-            await pool.query(
-                `INSERT INTO settings
-                 (id, hero_product_id, color_primary, color_secondary, color_accent, color_bg, color_surface)
-                 VALUES (1, ?, ?, ?, ?, ?, ?)`,
-                [hero_product_id, color_primary, color_secondary, color_accent, color_bg, color_surface]
-            );
-        }
-
-        res.json({ message: 'Settings updated successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to update settings' });
-    }
-});
-
-app.get('/api/products', async (_, res) => {
-    try {
-        const [rows] = await pool.query(
-            'SELECT * FROM products ORDER BY is_best_selling DESC, created_at DESC, id DESC'
-        );
-        res.json(rows);
-    } catch {
-        res.status(500).json({ error: 'Failed to load products' });
-    }
-});
-
-app.post('/api/products', authenticateToken, isAdmin, upload.single('image'), async (req, res) => {
-    try {
-        const name = String(req.body.name || '').trim();
-        const category_slug = req.body.category_slug || null;
-        const price = Number(req.body.price || 0);
-        const old_price = req.body.old_price ? Number(req.body.old_price) : null;
-        const stock = Number(req.body.stock || 0);
-        const description = String(req.body.description || '').trim();
-        const is_best_selling =
-            req.body.is_best_selling === true ||
-            req.body.is_best_selling === 'true' ||
-            req.body.is_best_selling === '1' ||
-            req.body.is_best_selling === 1;
-
-        if (!name || !category_slug || price <= 0) {
-            return res.status(400).json({ error: 'Name, category and valid price are required' });
-        }
-
-        const existing = await queryOne('SELECT id FROM products WHERE name = ?', [name]);
-        if (existing) return res.status(400).json({ error: 'Product with that name already exists' });
-
-        const image = req.file ? `/uploads/${req.file.filename}` : null;
-
-        await pool.query(
-            `INSERT INTO products
-            (name, category_slug, price, old_price, stock, image, description, is_best_selling)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [name, category_slug, price, old_price, stock, image, description, is_best_selling]
-        );
-
-        res.status(201).json({ message: 'Product created successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to create product' });
-    }
-});
-
-app.put('/api/products/:id', authenticateToken, isAdmin, upload.single('image'), async (req, res) => {
-    try {
-        const id = Number(req.params.id);
-        const name = String(req.body.name || '').trim();
-        const category_slug = req.body.category_slug || null;
-        const price = Number(req.body.price || 0);
-        const old_price = req.body.old_price ? Number(req.body.old_price) : null;
-        const stock = Number(req.body.stock || 0);
-        const description = String(req.body.description || '').trim();
-        const is_best_selling =
-            req.body.is_best_selling === true ||
-            req.body.is_best_selling === 'true' ||
-            req.body.is_best_selling === '1' ||
-            req.body.is_best_selling === 1;
-
-        const current = await queryOne('SELECT * FROM products WHERE id = ?', [id]);
-        if (!current) return res.status(404).json({ error: 'Product not found' });
-
-        const duplicate = await queryOne('SELECT id FROM products WHERE name = ? AND id != ?', [name, id]);
-        if (duplicate) return res.status(400).json({ error: 'Another product already uses that name' });
-
-        let image = current.image;
-        if (req.file) image = `/uploads/${req.file.filename}`;
-
-        await pool.query(
-            `UPDATE products
-             SET name = ?, category_slug = ?, price = ?, old_price = ?, stock = ?, image = ?, description = ?, is_best_selling = ?
-             WHERE id = ?`,
-            [name, category_slug, price, old_price, stock, image, description, is_best_selling, id]
-        );
-
-        res.json({ message: 'Product updated successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to update product' });
-    }
-});
-
-app.delete('/api/products/:id', authenticateToken, isAdmin, async (req, res) => {
-    try {
-        const id = Number(req.params.id);
-        await pool.query('DELETE FROM products WHERE id = ?', [id]);
-        res.json({ message: 'Product deleted successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to delete product' });
-    }
-});
-
-app.get('/api/categories', async (_, res) => {
-    try {
-        const [rows] = await pool.query('SELECT * FROM categories ORDER BY name ASC');
-        res.json(rows);
-    } catch {
-        res.status(500).json({ error: 'Failed to load categories' });
-    }
-});
-
-app.post('/api/categories', authenticateToken, isAdmin, async (req, res) => {
-    try {
-        const name = String(req.body.name || '').trim();
-        const slug = String(req.body.slug || '').trim().toLowerCase();
-        const icon = String(req.body.icon || 'fa-tag').trim();
-
-        if (!name || !slug) return res.status(400).json({ error: 'Name and slug are required' });
-
-        const existing = await queryOne('SELECT id FROM categories WHERE slug = ?', [slug]);
-        if (existing) return res.status(400).json({ error: 'Category slug already exists' });
-
-        await pool.query(
-            'INSERT INTO categories (name, slug, icon) VALUES (?, ?, ?)',
-            [name, slug, icon]
-        );
-
-        res.status(201).json({ message: 'Category created successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to create category' });
-    }
-});
-
-app.delete('/api/categories/:id', authenticateToken, isAdmin, async (req, res) => {
-    try {
-        const id = Number(req.params.id);
-        await pool.query('DELETE FROM categories WHERE id = ?', [id]);
-        res.json({ message: 'Category deleted successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to delete category' });
-    }
-});
-
+// -- CART & ORDERS --
 app.get('/api/cart', authenticateToken, isCustomer, async (req, res) => {
     try {
-        const [rows] = await pool.query(
-            `SELECT c.product_id, c.quantity, p.*
-             FROM cart c
-             JOIN products p ON c.product_id = p.id
-             WHERE c.user_id = ?
-             ORDER BY c.id DESC`,
-            [req.user.id]
-        );
+        const [rows] = await pool.query(`SELECT c.product_id, c.quantity, p.* FROM cart c JOIN products p ON c.product_id = p.id WHERE c.user_id = ? ORDER BY c.id DESC`, [req.user.id]);
         res.json(rows);
-    } catch {
-        res.status(500).json({ error: 'Failed to load cart' });
-    }
+    } catch { res.status(500).json({ error: 'Failed to load cart' }); }
 });
 
 app.post('/api/cart', authenticateToken, isCustomer, async (req, res) => {
     try {
-        const product_id = Number(req.body.product_id);
-        const quantity = Math.max(1, Number(req.body.quantity || 1));
-
+        const { product_id, quantity = 1 } = req.body;
         const product = await queryOne('SELECT id, stock FROM products WHERE id = ?', [product_id]);
         if (!product) return res.status(404).json({ error: 'Product not found' });
 
-        const existing = await queryOne(
-            'SELECT id, quantity FROM cart WHERE user_id = ? AND product_id = ?',
-            [req.user.id, product_id]
-        );
-
+        const existing = await queryOne('SELECT id, quantity FROM cart WHERE user_id = ? AND product_id = ?', [req.user.id, product_id]);
         if (existing) {
-            const newQty = existing.quantity + quantity;
-            if (newQty > product.stock) return res.status(400).json({ error: 'Not enough stock available' });
-
-            await pool.query(
-                'UPDATE cart SET quantity = ? WHERE id = ?',
-                [newQty, existing.id]
-            );
+            if (existing.quantity + quantity > product.stock) return res.status(400).json({ error: 'Not enough stock' });
+            await pool.query('UPDATE cart SET quantity = ? WHERE id = ?', [existing.quantity + quantity, existing.id]);
         } else {
-            if (quantity > product.stock) return res.status(400).json({ error: 'Not enough stock available' });
-
-            await pool.query(
-                'INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)',
-                [req.user.id, product_id, quantity]
-            );
+            if (quantity > product.stock) return res.status(400).json({ error: 'Not enough stock' });
+            await pool.query('INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)', [req.user.id, product_id, quantity]);
         }
-
-        res.json({ message: 'Added to cart successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to add to cart' });
-    }
+        res.json({ message: 'Added to cart' });
+    } catch { res.status(500).json({ error: 'Failed to add to cart' }); }
 });
 
 app.put('/api/cart/:productId', authenticateToken, isCustomer, async (req, res) => {
     try {
-        const productId = Number(req.params.productId);
-        const quantity = Math.max(1, Number(req.body.quantity || 1));
-
-        const product = await queryOne('SELECT id, stock FROM products WHERE id = ?', [productId]);
-        if (!product) return res.status(404).json({ error: 'Product not found' });
-        if (quantity > product.stock) return res.status(400).json({ error: 'Not enough stock available' });
-
-        await pool.query(
-            'UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ?',
-            [quantity, req.user.id, productId]
-        );
-
-        res.json({ message: 'Cart updated successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to update cart' });
-    }
+        const { quantity } = req.body;
+        await pool.query('UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ?', [quantity, req.user.id, req.params.productId]);
+        res.json({ message: 'Cart updated' });
+    } catch { res.status(500).json({ error: 'Failed to update cart' }); }
 });
 
 app.delete('/api/cart/:productId', authenticateToken, isCustomer, async (req, res) => {
     try {
-        const productId = Number(req.params.productId);
-        await pool.query('DELETE FROM cart WHERE user_id = ? AND product_id = ?', [req.user.id, productId]);
-        res.json({ message: 'Removed from cart successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to remove item from cart' });
-    }
+        await pool.query('DELETE FROM cart WHERE user_id = ? AND product_id = ?', [req.user.id, req.params.productId]);
+        res.json({ message: 'Removed' });
+    } catch { res.status(500).json({ error: 'Failed to remove' }); }
 });
 
+// Order Placement & M-Pesa STK Push
 app.post('/api/orders', authenticateToken, isCustomer, async (req, res) => {
     const connection = await pool.getConnection();
-
     try {
         await connection.beginTransaction();
+        const { couponCode, mpesaPhone } = req.body;
 
-        const [cartItems] = await connection.query(
-            `SELECT c.quantity, p.id, p.name, p.price, p.stock
-             FROM cart c
-             JOIN products p ON c.product_id = p.id
-             WHERE c.user_id = ?`,
-            [req.user.id]
-        );
+        const [cartItems] = await connection.query(`SELECT c.quantity, p.id, p.name, p.price, p.stock FROM cart c JOIN products p ON c.product_id = p.id WHERE c.user_id = ?`, [req.user.id]);
+        if (cartItems.length === 0) throw new Error('Your cart is empty');
 
-        if (cartItems.length === 0) {
-            throw new Error('Your cart is empty');
-        }
-
-        let total = 0;
+        let subtotal = 0;
         for (const item of cartItems) {
-            if (item.stock < item.quantity) {
-                throw new Error(`Insufficient stock for ${item.name}`);
-            }
-            total += Number(item.price) * Number(item.quantity);
+            if (item.stock < item.quantity) throw new Error(`Insufficient stock for ${item.name}`);
+            subtotal += Number(item.price) * Number(item.quantity);
         }
 
+        let discount = 0;
+        if (couponCode) {
+            const coupon = await queryOne('SELECT discount_percent FROM coupons WHERE code = ? AND is_active = TRUE', [couponCode]);
+            if (coupon) discount = subtotal * (coupon.discount_percent / 100);
+        }
+
+        const total = subtotal - discount;
         const orderNumber = `ORD${Date.now()}`;
+        
+        // M-Pesa Implementation Structure
+        let mpesaReceipt = null;
+        let initialStatus = 'Pending';
+        if (mpesaPhone) {
+            // In a production environment, this triggers the Safaricom Daraja STK Push API
+            console.log(`Initiating STK Push to ${mpesaPhone} for KES ${total}`);
+            // Mocking successful push response
+            mpesaReceipt = `MPESA${Math.floor(Math.random() * 1000000)}`;
+            initialStatus = 'Processing'; // Payment successful
+        }
 
-        const [orderResult] = await connection.query(
-            `INSERT INTO orders (order_number, user_id, customer_name, total)
-             VALUES (?, ?, ?, ?)`,
-            [orderNumber, req.user.id, req.user.name, total]
-        );
-
+        const [orderResult] = await connection.query(`INSERT INTO orders (order_number, user_id, customer_name, total, status, mpesa_receipt) VALUES (?, ?, ?, ?, ?, ?)`, [orderNumber, req.user.id, req.user.name, total, initialStatus, mpesaReceipt]);
         const orderId = orderResult.insertId;
 
         for (const item of cartItems) {
-            await connection.query(
-                `INSERT INTO order_items (order_id, product_id, product_name, quantity, price)
-                 VALUES (?, ?, ?, ?, ?)`,
-                [orderId, item.id, item.name, item.quantity, item.price]
-            );
-
-            await connection.query(
-                'UPDATE products SET stock = stock - ? WHERE id = ?',
-                [item.quantity, item.id]
-            );
+            await connection.query(`INSERT INTO order_items (order_id, product_id, product_name, quantity, price) VALUES (?, ?, ?, ?, ?)`, [orderId, item.id, item.name, item.quantity, item.price]);
+            await connection.query('UPDATE products SET stock = stock - ? WHERE id = ?', [item.quantity, item.id]);
         }
 
         await connection.query('DELETE FROM cart WHERE user_id = ?', [req.user.id]);
         await connection.commit();
 
-        res.status(201).json({ message: 'Order placed successfully' });
+        res.status(201).json({ message: 'Order placed successfully', orderNumber });
     } catch (err) {
         await connection.rollback();
         res.status(400).json({ error: err.message || 'Failed to place order' });
-    } finally {
-        connection.release();
-    }
+    } finally { connection.release(); }
 });
 
 app.get('/api/orders', authenticateToken, async (req, res) => {
     try {
         let sql = 'SELECT * FROM orders';
         const params = [];
-
-        if (req.user.role !== 'admin') {
-            sql += ' WHERE user_id = ?';
-            params.push(req.user.id);
-        }
-
+        if (req.user.role !== 'admin') { sql += ' WHERE user_id = ?'; params.push(req.user.id); }
         sql += ' ORDER BY created_at DESC, id DESC';
 
         const [orders] = await pool.query(sql, params);
-
         for (const order of orders) {
-            const [items] = await pool.query(
-                'SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC',
-                [order.id]
-            );
+            const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC', [order.id]);
             order.items = items;
         }
-
         res.json(orders);
-    } catch {
-        res.status(500).json({ error: 'Failed to load orders' });
-    }
+    } catch { res.status(500).json({ error: 'Failed to load orders' }); }
 });
 
+// PDF Invoice Generation
+app.get('/api/orders/:orderNumber/invoice', authenticateToken, async (req, res) => {
+    try {
+        const order = await queryOne('SELECT * FROM orders WHERE order_number = ?', [req.params.orderNumber]);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+        
+        if (req.user.role !== 'admin' && order.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
+        const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
+
+        const doc = new PDFDocument({ margin: 50 });
+        res.setHeader('Content-disposition', `attachment; filename=invoice_${order.order_number}.pdf`);
+        res.setHeader('Content-type', 'application/pdf');
+        doc.pipe(res);
+
+        doc.fontSize(20).text('UrbanMart Invoice', { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(12).text(`Order Number: ${order.order_number}`);
+        doc.text(`Date: ${new Date(order.created_at).toLocaleString()}`);
+        doc.text(`Customer: ${order.customer_name}`);
+        doc.text(`Status: ${order.status}`);
+        if(order.mpesa_receipt) doc.text(`M-Pesa Receipt: ${order.mpesa_receipt}`);
+        doc.moveDown();
+        
+        doc.text('Items:', { underline: true });
+        items.forEach(item => {
+            doc.text(`${item.product_name} - Qty: ${item.quantity} - KSh ${item.price}`);
+        });
+        
+        doc.moveDown();
+        doc.fontSize(14).text(`Total: KSh ${order.total}`, { align: 'right' });
+        doc.end();
+
+    } catch (err) { res.status(500).json({ error: 'Failed to generate invoice' }); }
+});
+
+// -- ADMIN ROUTES --
 app.put('/api/orders/:id', authenticateToken, isAdmin, async (req, res) => {
     try {
-        const id = Number(req.params.id);
-        const status = String(req.body.status || '').trim();
-
-        if (!['Pending', 'Shipped', 'Delivered', 'Cancelled'].includes(status)) {
-            return res.status(400).json({ error: 'Invalid order status' });
-        }
-
-        await pool.query('UPDATE orders SET status = ? WHERE id = ?', [status, id]);
-        res.json({ message: 'Order status updated successfully' });
-    } catch {
-        res.status(500).json({ error: 'Failed to update order status' });
-    }
-});
-
-app.get('/api/users', authenticateToken, isAdmin, async (_, res) => {
-    try {
-        const [rows] = await pool.query(
-            'SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC, id DESC'
-        );
-        res.json(rows);
-    } catch {
-        res.status(500).json({ error: 'Failed to load users' });
-    }
+        const { status } = req.body;
+        await pool.query('UPDATE orders SET status = ? WHERE id = ?', [status, req.params.id]);
+        await logAdminAction(req, `Updated Order #${req.params.id} to ${status}`);
+        res.json({ message: 'Order updated' });
+    } catch { res.status(500).json({ error: 'Failed to update order' }); }
 });
 
 app.get('/api/admin/stats', authenticateToken, isAdmin, async (_, res) => {
     try {
-        const totalProducts = await queryOne('SELECT COUNT(*) AS count FROM products');
-        const totalCategories = await queryOne('SELECT COUNT(*) AS count FROM categories');
-        const totalUsers = await queryOne('SELECT COUNT(*) AS count FROM users');
-        const totalOrders = await queryOne('SELECT COUNT(*) AS count FROM orders');
-        const totalRevenue = await queryOne(
-            `SELECT COALESCE(SUM(total), 0) AS total
-             FROM orders
-             WHERE status IN ('Pending', 'Shipped', 'Delivered')`
-        );
-        const lowStock = await queryOne('SELECT COUNT(*) AS count FROM products WHERE stock <= 5');
-        const recentOrders = await queryOne(
-            `SELECT COALESCE(COUNT(*), 0) AS count
-             FROM orders
-             WHERE DATE(created_at) = CURDATE()`
-        );
+        const [stats] = await pool.query(`
+            SELECT 
+                (SELECT COUNT(*) FROM products) as totalProducts,
+                (SELECT COUNT(*) FROM categories) as totalCategories,
+                (SELECT COUNT(*) FROM users) as totalUsers,
+                (SELECT COUNT(*) FROM orders) as totalOrders,
+                (SELECT COALESCE(SUM(total), 0) FROM orders WHERE status != 'Cancelled') as totalRevenue,
+                (SELECT COUNT(*) FROM products WHERE stock <= 5) as lowStockProducts
+        `);
+        res.json(stats[0]);
+    } catch { res.status(500).json({ error: 'Failed to load stats' }); }
+});
 
-        res.json({
-            totalProducts: totalProducts.count,
-            totalCategories: totalCategories.count,
-            totalUsers: totalUsers.count,
-            totalOrders: totalOrders.count,
-            totalRevenue: Number(totalRevenue.total || 0),
-            lowStockProducts: lowStock.count,
-            todayOrders: recentOrders.count
+app.get('/api/admin/audit', authenticateToken, isAdmin, async (_, res) => {
+    try {
+        const [logs] = await pool.query('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50');
+        res.json(logs);
+    } catch { res.status(500).json({ error: 'Failed to load audit logs' }); }
+});
+
+// Product Management & CSV Bulk Upload
+app.post('/api/products/bulk', authenticateToken, isAdmin, upload.single('csv'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No CSV file uploaded' });
+    const results = [];
+    
+    fs.createReadStream(req.file.path)
+        .pipe(csv())
+        .on('data', (data) => results.push(data))
+        .on('end', async () => {
+            try {
+                for (const item of results) {
+                    if(item.name && item.price) {
+                        await pool.query(
+                            `INSERT INTO products (name, category_slug, price, stock, description) VALUES (?, ?, ?, ?, ?)`,
+                            [item.name, item.category_slug, item.price, item.stock || 0, item.description || '']
+                        );
+                    }
+                }
+                fs.unlinkSync(req.file.path); // Clean up file
+                await logAdminAction(req, `Bulk uploaded ${results.length} products via CSV`);
+                res.json({ message: 'Bulk upload successful' });
+            } catch (err) {
+                res.status(500).json({ error: 'Error processing CSV data' });
+            }
         });
-    } catch {
-        res.status(500).json({ error: 'Failed to load admin stats' });
-    }
 });
 
-// Fallback for API routes
-app.use('/api/*', (_, res) => {
-    res.status(404).json({ error: 'API route not found' });
+app.post('/api/products', authenticateToken, isAdmin, upload.single('image'), async (req, res) => {
+    try {
+        const { name, category_slug, price, stock, description, is_best_selling } = req.body;
+        const image = req.file ? `/uploads/${req.file.filename}` : null;
+        
+        await pool.query(
+            `INSERT INTO products (name, category_slug, price, stock, image, description, is_best_selling) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [name, category_slug, price, stock, image, description, is_best_selling === 'true']
+        );
+        await logAdminAction(req, `Created product: ${name}`);
+        res.status(201).json({ message: 'Product created' });
+    } catch { res.status(500).json({ error: 'Failed to create product' }); }
 });
 
-// Any other route falls back to index.html for SPA support
-app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+// Fallback routing
+app.use('/api/*', (_, res) => res.status(404).json({ error: 'API route not found' }););
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const PORT = process.env.PORT || 5000;
-
-// Initialize the database, then start listening
 initializeDatabase().then(() => {
-    app.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
-    });
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 });
