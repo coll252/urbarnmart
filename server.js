@@ -17,8 +17,10 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Serve static frontend files from the 'public' directory
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Configure persistent storage path for Render or fallback to local
 const uploadDir = process.env.RENDER_DISK_PATH || path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -33,6 +35,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+// Configure Database Connection for Aiven (SSL) or Local
 const dbConfig = {
     connectionLimit: 10,
     waitForConnections: true,
@@ -41,7 +44,7 @@ const dbConfig = {
 
 if (process.env.DATABASE_URL) {
     dbConfig.uri = process.env.DATABASE_URL;
-    dbConfig.ssl = { rejectUnauthorized: false }; 
+    dbConfig.ssl = { rejectUnauthorized: false }; // Required for Aiven
 } else {
     dbConfig.host = process.env.DB_HOST;
     dbConfig.user = process.env.DB_USER;
@@ -52,7 +55,7 @@ if (process.env.DATABASE_URL) {
 const pool = mysql.createPool(dbConfig);
 
 // ==========================================
-// PHASE 2: DATABASE EXPANSION & INITIALIZATION
+// AUTOMATIC DATABASE INITIALIZATION
 // ==========================================
 async function initializeDatabase() {
     try {
@@ -143,7 +146,11 @@ async function initializeDatabase() {
         // Seed data logic
         const [catRows] = await pool.query('SELECT COUNT(*) as count FROM categories');
         if (catRows[0].count === 0) {
-            await pool.query(`INSERT INTO categories (name, slug, icon) VALUES ('Smartphone & Tablet', 'smartphone-tablet', 'fa-mobile-alt'), ('Watch & Jewelry', 'watch-jewelry', 'fa-clock');`);
+            await pool.query(`INSERT INTO categories (name, slug, icon) VALUES 
+                ('Smartphone & Tablet', 'smartphone-tablet', 'fa-mobile-alt'), 
+                ('Watch & Jewelry', 'watch-jewelry', 'fa-clock'),
+                ('Audio & Electronics', 'electronics', 'fa-headphones'),
+                ('Laptops & PCs', 'laptop', 'fa-laptop');`);
         }
         
         const [couponRows] = await pool.query('SELECT COUNT(*) as count FROM coupons');
@@ -153,7 +160,7 @@ async function initializeDatabase() {
 
         const [setRows] = await pool.query('SELECT COUNT(*) as count FROM settings');
         if (setRows[0].count === 0) {
-            await pool.query(`INSERT INTO settings (id, color_primary) VALUES (1, '#020617');`);
+            await pool.query(`INSERT INTO settings (id, color_primary) VALUES (1, '#0f172a');`);
         }
 
         console.log("Database initialized successfully!");
@@ -198,13 +205,16 @@ async function queryOne(sql, params = []) {
 
 async function logAdminAction(req, action) {
     try {
-        await pool.query('INSERT INTO audit_logs (user_id, user_name, action) VALUES (?, ?, ?)', [req.user.id, req.user.name, action]);
-    } catch (err) { console.error('Audit log failed', err); }
+        await pool.query('INSERT INTO audit_logs (user_id, user_name, action) VALUES (?, ?, ?)', [req.user.id || 0, req.user.name || 'System', action]);
+    } catch (err) { 
+        console.error('Audit log failed', err); 
+    }
 }
 
 // ==========================================
 // API ROUTES
 // ==========================================
+// Heartbeat to keep session active
 app.get('/api/heartbeat', (_, res) => res.json({ ok: true, timestamp: Date.now() }));
 
 app.get('/api/bootstrap', async (_, res) => {
@@ -220,14 +230,17 @@ app.get('/api/bootstrap', async (_, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
     try {
-        const { name, email, password } = req.body;
+        const name = String(req.body.name || '').trim();
+        const email = String(req.body.email || '').trim().toLowerCase();
+        const password = String(req.body.password || '');
+
         if (!name || !email || !password) return res.status(400).json({ error: 'All fields are required' });
         
         const existing = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
         if (existing) return res.status(400).json({ error: 'Email already exists' });
 
         const hashed = await bcrypt.hash(password, 10);
-        await pool.query('INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)', [name, email.toLowerCase(), hashed, 'customer']);
+        await pool.query('INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)', [name, email, hashed, 'customer']);
         res.status(201).json({ message: 'Account created successfully' });
     } catch { res.status(500).json({ error: 'Registration failed' }); }
 });
@@ -240,6 +253,7 @@ app.post('/api/auth/login', async (req, res) => {
 
         if (email === adminEmail && password === process.env.ADMIN_PASSWORD) {
             const adminUser = { id: 0, name: 'System Administrator', email: adminEmail, role: 'admin' };
+            await logAdminAction({ user: adminUser }, 'Admin logged into system');
             return res.json({ token: signToken(adminUser), user: adminUser });
         }
 
@@ -321,7 +335,6 @@ app.post('/api/orders', authenticateToken, isCustomer, async (req, res) => {
         let mpesaReceipt = null;
         let initialStatus = 'Pending';
         if (mpesaPhone) {
-            // In a production environment, this triggers the Safaricom Daraja STK Push API
             console.log(`Initiating STK Push to ${mpesaPhone} for KES ${total}`);
             // Mocking successful push response
             mpesaReceipt = `MPESA${Math.floor(Math.random() * 1000000)}`;
@@ -403,7 +416,7 @@ app.put('/api/orders/:id', authenticateToken, isAdmin, async (req, res) => {
     try {
         const { status } = req.body;
         await pool.query('UPDATE orders SET status = ? WHERE id = ?', [status, req.params.id]);
-        await logAdminAction(req, `Updated Order #${req.params.id} to ${status}`);
+        await logAdminAction(req, `Updated Order #${req.params.id} status to ${status}`);
         res.json({ message: 'Order updated' });
     } catch { res.status(500).json({ error: 'Failed to update order' }); }
 });
@@ -430,6 +443,38 @@ app.get('/api/admin/audit', authenticateToken, isAdmin, async (_, res) => {
     } catch { res.status(500).json({ error: 'Failed to load audit logs' }); }
 });
 
+// Settings Management
+app.put('/api/settings', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        const { hero_product_id = null, color_primary, color_secondary, color_accent, color_bg, color_surface } = req.body;
+        await pool.query(
+            `UPDATE settings SET hero_product_id = ?, color_primary = ?, color_secondary = ?, color_accent = ?, color_bg = ?, color_surface = ? WHERE id = 1`,
+            [hero_product_id, color_primary, color_secondary, color_accent, color_bg, color_surface]
+        );
+        await logAdminAction(req, 'Updated store appearance settings');
+        res.json({ message: 'Settings updated' });
+    } catch { res.status(500).json({ error: 'Failed to update settings' }); }
+});
+
+// Category Management
+app.post('/api/categories', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        const { name, slug, icon } = req.body;
+        if (!name || !slug) return res.status(400).json({ error: 'Name and slug are required' });
+        await pool.query('INSERT INTO categories (name, slug, icon) VALUES (?, ?, ?)', [name, slug.toLowerCase(), icon]);
+        await logAdminAction(req, `Created category: ${name}`);
+        res.status(201).json({ message: 'Category created' });
+    } catch { res.status(500).json({ error: 'Failed to create category' }); }
+});
+
+app.delete('/api/categories/:id', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM categories WHERE id = ?', [req.params.id]);
+        await logAdminAction(req, `Deleted category ID: ${req.params.id}`);
+        res.json({ message: 'Category deleted' });
+    } catch { res.status(500).json({ error: 'Failed to delete category' }); }
+});
+
 // Product Management & CSV Bulk Upload
 app.post('/api/products/bulk', authenticateToken, isAdmin, upload.single('csv'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No CSV file uploaded' });
@@ -448,7 +493,7 @@ app.post('/api/products/bulk', authenticateToken, isAdmin, upload.single('csv'),
                         );
                     }
                 }
-                fs.unlinkSync(req.file.path); // Clean up file
+                fs.unlinkSync(req.file.path); 
                 await logAdminAction(req, `Bulk uploaded ${results.length} products via CSV`);
                 res.json({ message: 'Bulk upload successful' });
             } catch (err) {
@@ -471,8 +516,42 @@ app.post('/api/products', authenticateToken, isAdmin, upload.single('image'), as
     } catch { res.status(500).json({ error: 'Failed to create product' }); }
 });
 
-// Fallback routing
-app.use('/api/*', (_, res) => res.status(404).json({ error: 'API route not found' }););
+app.put('/api/products/:id', authenticateToken, isAdmin, upload.single('image'), async (req, res) => {
+    try {
+        const { name, category_slug, price, old_price, stock, description, is_best_selling } = req.body;
+        const current = await queryOne('SELECT * FROM products WHERE id = ?', [req.params.id]);
+        if (!current) return res.status(404).json({ error: 'Product not found' });
+
+        let image = current.image;
+        if (req.file) image = `/uploads/${req.file.filename}`;
+
+        await pool.query(
+            `UPDATE products SET name = ?, category_slug = ?, price = ?, old_price = ?, stock = ?, image = ?, description = ?, is_best_selling = ? WHERE id = ?`,
+            [name, category_slug, price, old_price || null, stock, image, description, is_best_selling === 'true', req.params.id]
+        );
+        await logAdminAction(req, `Updated product ID: ${req.params.id}`);
+        res.json({ message: 'Product updated' });
+    } catch { res.status(500).json({ error: 'Failed to update product' }); }
+});
+
+app.delete('/api/products/:id', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM products WHERE id = ?', [req.params.id]);
+        await logAdminAction(req, `Deleted product ID: ${req.params.id}`);
+        res.json({ message: 'Product deleted' });
+    } catch { res.status(500).json({ error: 'Failed to delete product' }); }
+});
+
+app.get('/api/users', authenticateToken, isAdmin, async (_, res) => {
+    try {
+        const [rows] = await pool.query('SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC, id DESC');
+        res.json(rows);
+    } catch { res.status(500).json({ error: 'Failed to load users' }); }
+});
+
+// Syntax Error Fixed here (removed the trailing semicolon inside the parenthesis)
+app.use('/api/*', (_, res) => res.status(404).json({ error: 'API route not found' }));
+
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const PORT = process.env.PORT || 5000;
