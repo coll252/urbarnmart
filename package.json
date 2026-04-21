@@ -1,24 +1,37 @@
 {
-  "name": "urbanmart",
+  "name": "urbanmart-pro",
   "version": "1.0.0",
-  "description": "UrbanMart E-commerce Platform",
+  "description": "UrbanMart production-ready eCommerce backend with MySQL, JWT auth, M-Pesa, email reset, PDF invoices, CSV upload, and WebAuthn biometrics",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
+  "keywords": [
+    "urbanmart",
+    "ecommerce",
+    "express",
+    "mysql",
+    "mpesa",
+    "jwt",
+    "webauthn",
+    "nodemailer"
+  ],
+  "author": "Collins Kiprotich",
+  "license": "MIT",
   "dependencies": {
-    "axios": "^1.6.8",
+    "@simplewebauthn/server": "^13.3.0",
+    "axios": "^1.8.4",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
-    "csv-parser": "^3.0.0",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "csv-parser": "^3.2.0",
+    "dotenv": "^16.4.7",
+    "express": "^5.2.1",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
-    "mysql2": "^3.9.7",
-    "pdfkit": "^0.15.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "multer": "^2.0.0",
+    "mysql2": "^3.22.2",
+    "nodemailer": "^8.0.5",
+    "pdfkit": "^0.17.1"
   }
 }
