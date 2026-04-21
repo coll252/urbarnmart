@@ -26,7 +26,6 @@
       --modal-bg:rgba(15,23,42,.55);
     }
     
-    /* Dark Mode Variables */
     body.dark-mode {
       --primary:#f8fafc;
       --secondary:#cbd5e1;
@@ -125,11 +124,6 @@
     .card button{flex:1;}
     .muted{color:var(--muted);font-size:14px;}
     
-    .footer{margin-top:40px;background:#0f172a;color:#cbd5e1;padding:42px 0;}
-    .footer-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:24px;}
-    .footer h3,.footer h4{color:#fff;margin-top:0}
-    .footer-category-link{display:block;margin:8px 0;cursor:pointer;transition:.2s ease;}
-    
     .panel{background:var(--surface);border:1px solid var(--border);border-radius:26px;box-shadow:var(--shadow);}
     .modal{position:fixed;inset:0;background:var(--modal-bg);display:none;align-items:center;justify-content:center;padding:20px;z-index:100;backdrop-filter:blur(4px);}
     .modal.show{display:flex}
@@ -211,9 +205,13 @@
     .coupon-box{display:flex;gap:10px;margin-bottom:16px;padding:16px;background:var(--bg);border-radius:16px;border:1px solid var(--border);}
     .mpesa-box{display:flex;flex-direction:column;gap:10px;margin-top:16px;}
     .summary-row{display:flex;justify-content:space-between;color:var(--muted);margin-bottom:8px;font-size:14px;}
+    
+    /* Star Rating Input */
+    .star-input { display:flex; gap:8px; font-size:24px; color:var(--muted); cursor:pointer; margin-bottom:16px;}
+    .star-input i:hover, .star-input i.active { color:#fbbf24; }
 
     @media (max-width: 980px){
-      .hero-box,.admin-grid,.footer-grid,.admin-layout,.form-grid{grid-template-columns:1fr;}
+      .hero-box,.admin-grid,.admin-layout,.form-grid{grid-template-columns:1fr;}
       .sidebar{position:relative;height:auto;}
     }
     @media (max-width: 720px){
@@ -269,6 +267,10 @@
           <label>Password</label>
           <input class="form-control" id="registerPassword" type="password" placeholder="••••••••">
         </div>
+        <div class="form-group">
+          <label>Referral Code (Optional)</label>
+          <input class="form-control" id="registerReferral" type="text" placeholder="e.g. UMX1Y2Z3">
+        </div>
         <button class="btn" id="registerBtn" style="width:100%; margin-bottom:14px;">Create Account</button>
         <p class="auth-switch">Already have an account? <b onclick="toggleAuthMode('login')">Sign in</b></p>
       </div>
@@ -302,6 +304,30 @@
         <button class="close" onclick="closeModal('profileModal')"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div id="profileContent"></div>
+    </div>
+  </div>
+  
+  <div class="modal" id="reviewModal">
+    <div class="modal-card" style="max-width:440px;">
+      <div class="modal-head">
+        <h2 style="margin:0;color:var(--primary)">Rate Product</h2>
+        <button class="close" onclick="closeModal('reviewModal')"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <p id="reviewProductName" style="font-weight:700;margin-bottom:16px;"></p>
+      <input type="hidden" id="reviewProductId">
+      <div class="star-input" id="starInputContainer">
+        <i class="fa-solid fa-star active" data-val="1" onclick="setReviewRating(1)"></i>
+        <i class="fa-solid fa-star active" data-val="2" onclick="setReviewRating(2)"></i>
+        <i class="fa-solid fa-star active" data-val="3" onclick="setReviewRating(3)"></i>
+        <i class="fa-solid fa-star active" data-val="4" onclick="setReviewRating(4)"></i>
+        <i class="fa-solid fa-star active" data-val="5" onclick="setReviewRating(5)"></i>
+      </div>
+      <input type="hidden" id="reviewRatingVal" value="5">
+      <div class="form-group">
+        <label>Your Review</label>
+        <textarea class="form-control" id="reviewComment" placeholder="Tell others what you think about this product..."></textarea>
+      </div>
+      <button class="btn" style="width:100%" onclick="submitReview()">Submit Review</button>
     </div>
   </div>
 
@@ -415,7 +441,14 @@
     if (state.token) {
       const payload = decodeToken(state.token);
       if (payload) {
-        state.currentUser = { id: payload.id, name: payload.name, role: payload.role, email: payload.email || '' };
+        state.currentUser = { 
+            id: payload.id, 
+            name: payload.name, 
+            role: payload.role, 
+            email: payload.email || '',
+            referral_code: payload.referral_code || null,
+            points: payload.points || 0
+        };
       } else {
         state.token = ''; localStorage.removeItem('urbanmart_token');
       }
@@ -458,7 +491,6 @@
         document.body.classList.add('dark-mode');
       } else {
         document.body.classList.remove('dark-mode');
-        // Apply custom admin settings only if light mode
         const s = state.settings || {};
         if (s.color_primary) root.style.setProperty('--primary', s.color_primary);
         if (s.color_accent) root.style.setProperty('--accent', s.color_accent);
@@ -522,11 +554,10 @@
       }
     }
 
-    // Biometric Auth Action
     function biometricLogin() {
       toast('Please authenticate using your device biometrics...', 'success');
       setTimeout(() => {
-        toast('Biometrics simulated successfully! (Phase 2 feature)', 'success');
+        toast('Biometrics simulated successfully!', 'success');
       }, 1500);
     }
 
@@ -559,7 +590,7 @@
         `<i class="fa-solid fa-star"></i>`.repeat(full) + 
         (half ? `<i class="fa-solid fa-star-half-stroke"></i>` : '') + 
         `<i class="fa-regular fa-star"></i>`.repeat(empty) + 
-        `<span style="color:var(--muted);margin-left:4px;">(${Math.floor(Math.random() * 120) + 5})</span></div>`;
+        `<span style="color:var(--muted);margin-left:4px;">(${Math.floor(Math.random() * 120) + 5} reviews)</span></div>`;
     }
 
     function renderStore() {
@@ -701,6 +732,44 @@
       document.getElementById('shopSection').scrollIntoView({behavior:'smooth'});
     }
 
+    function openReviewModal(productId, productName) {
+        document.getElementById('reviewProductId').value = productId;
+        document.getElementById('reviewProductName').textContent = productName;
+        document.getElementById('reviewComment').value = '';
+        setReviewRating(5); 
+        openModal('reviewModal');
+    }
+
+    function setReviewRating(val) {
+        document.getElementById('reviewRatingVal').value = val;
+        const stars = document.querySelectorAll('#starInputContainer i');
+        stars.forEach((star, index) => {
+            if (index < val) {
+                star.classList.replace('fa-regular', 'fa-solid');
+                star.style.color = '#fbbf24';
+            } else {
+                star.classList.replace('fa-solid', 'fa-regular');
+                star.style.color = 'var(--muted)';
+            }
+        });
+    }
+
+    async function submitReview() {
+        const id = document.getElementById('reviewProductId').value;
+        const rating = document.getElementById('reviewRatingVal').value;
+        const comment = document.getElementById('reviewComment').value;
+        
+        try {
+            await apiFetch(`/products/${id}/reviews`, { method: 'POST', body: JSON.stringify({ rating, comment }) });
+            closeModal('reviewModal');
+            await loadBootstrap();
+            if(state.adminTab !== 'dashboard') renderStore(); // refresh store to show new rating
+            toast('Review submitted successfully! Thank you.');
+        } catch(e) {
+            toast(e.message, 'error');
+        }
+    }
+
     function renderProfile() {
       const content = document.getElementById('profileContent');
       if (!state.currentUser) return;
@@ -733,9 +802,12 @@
 
             <div style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
               ${(order.items || []).map(item => `
-                <div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;font-size:14px;">
+                <div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;font-size:14px; align-items:center;">
                   <div>${escapeHtml(item.product_name)} × <b>${item.quantity}</b></div>
-                  <div style="font-weight:600;">${formatMoney(Number(item.price) * Number(item.quantity))}</div>
+                  <div style="display:flex; gap:12px; align-items:center;">
+                    <div style="font-weight:600;">${formatMoney(Number(item.price) * Number(item.quantity))}</div>
+                    <button class="tiny primary" onclick="openReviewModal(${item.product_id}, '${escapeHtml(item.product_name).replace(/'/g, "\\'")}')">Rate</button>
+                  </div>
                 </div>
               `).join('')}
             </div>
@@ -750,10 +822,19 @@
             <div style="width:72px;height:72px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:28px;font-weight:800;margin:0 auto 16px;">
               ${state.currentUser.name.charAt(0)}
             </div>
-            <div style="text-align:center;">
+            <div style="text-align:center; margin-bottom:18px;">
                 <div style="font-size:18px;font-weight:800;color:var(--primary)">${escapeHtml(state.currentUser.name)}</div>
-                <div class="muted" style="margin-bottom:24px;word-break:break-all;">${escapeHtml(state.currentUser.email)}</div>
+                <div class="muted" style="word-break:break-all;">${escapeHtml(state.currentUser.email)}</div>
             </div>
+            
+            ${state.currentUser.role !== 'admin' ? `
+            <div style="margin-bottom: 20px; padding: 16px; background: rgba(16,185,129,0.05); border-radius: 16px; border: 1px dashed var(--accent); text-align:center;">
+                <div style="font-size:12px; color:var(--muted); text-transform:uppercase; font-weight:700;">Loyalty Points</div>
+                <div style="font-size:28px; font-weight:800; color:var(--accent);">${state.currentUser.points || 0}</div>
+                <div style="font-size:12px; margin-top:12px; color:var(--muted);">Your Referral Code:</div>
+                <div style="font-weight:800; color:var(--primary); font-family:monospace; font-size:18px; letter-spacing:2px;">${state.currentUser.referral_code || 'N/A'}</div>
+            </div>` : ''}
+
             ${ state.currentUser.role === 'admin' ? `<button class="btn" style="width:100%;margin-bottom:12px" onclick="closeModal('profileModal');openAdmin()">Admin Dashboard</button>` : '' }
             <button class="btn-secondary" style="width:100%;margin-bottom:12px" onclick="closeModal('profileModal');showWishlist()">My Wishlist</button>
             <button class="btn-danger" style="width:100%" onclick="logout()">Sign Out</button>
@@ -787,7 +868,7 @@
         toast('Coupon applied successfully! 10% off.');
         renderCart();
       } else {
-        toast('Invalid or expired coupon code', 'error');
+        toast('Invalid or expired promo code', 'error');
       }
     }
 
@@ -801,7 +882,6 @@
       let subtotal = state.cart.reduce((sum, item) => sum + Number(item.price) * Number(item.quantity), 0);
       let discountAmt = subtotal * (state.discount/100);
       
-      // Calculate Tax and Delivery based on Subtotal minus Discount
       let taxableAmount = subtotal - discountAmt;
       let taxAmt = taxableAmount * state.taxRate;
       let delivery = (taxableAmount > 50000) ? 0 : state.deliveryFee; 
@@ -940,7 +1020,9 @@
         const name = document.getElementById('registerName').value.trim();
         const email = document.getElementById('registerEmail').value.trim();
         const password = document.getElementById('registerPassword').value;
-        await apiFetch('/auth/register', { method: 'POST', body: JSON.stringify({ name, email, password }) });
+        const referralCode = document.getElementById('registerReferral').value.trim();
+        
+        await apiFetch('/auth/register', { method: 'POST', body: JSON.stringify({ name, email, password, referral_code: referralCode }) });
         toggleAuthMode('login'); toast('Account created. Please log in.');
       } catch (err) { toast(err.message, 'error'); }
       finally { btn.textContent = 'Create Account'; }
@@ -949,6 +1031,16 @@
     function openAdmin() { if (state.currentUser?.role === 'admin') renderAdmin(); }
     async function backToStore() { await Promise.all([loadBootstrap(), loadCart(), loadOrders()]); renderStore(); window.scrollTo(0,0); }
     function setAdminTab(tab) { state.adminTab = tab; renderAdmin(); }
+
+    async function triggerCartRecovery() {
+        if(!confirm('This will send recovery emails to all users with active carts. Proceed?')) return;
+        try {
+            const res = await apiFetch('/admin/recover-carts', { method: 'POST' });
+            toast(res.message, 'success');
+            await loadAdminData();
+            renderAdmin(); // refresh to update audit logs
+        } catch(e) { toast(e.message, 'error'); }
+    }
 
     function renderAdmin() {
       document.getElementById('app').innerHTML = `
@@ -987,14 +1079,21 @@
           </div>
           <div class="admin-grid">
             <div class="box"><h3 style="margin-top:0;color:var(--primary);">Revenue Timeline (7 Days)</h3><canvas id="revenueChart" height="150"></canvas></div>
-            <div class="box" style="max-height:400px; overflow-y:auto;">
-              <h3 style="margin-top:0;color:var(--primary);position:sticky;top:0;background:var(--surface);padding-bottom:10px;">Critical Inventory</h3>
-              ${ state.products.filter(p => Number(p.stock) <= 5).map(p => `
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)">
-                  <span style="font-weight:600;font-size:14px;">${escapeHtml(p.name)}</span> 
-                  <span class="tag" style="background:rgba(239,68,68,0.1);color:#ef4444">${p.stock} units left</span>
+            <div style="display:flex; flex-direction:column; gap:18px;">
+                <div class="box" style="max-height:200px; overflow-y:auto;">
+                  <h3 style="margin-top:0;color:var(--primary);position:sticky;top:0;background:var(--surface);padding-bottom:10px;">Critical Inventory</h3>
+                  ${ state.products.filter(p => Number(p.stock) <= 5).map(p => `
+                    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)">
+                      <span style="font-weight:600;font-size:14px;">${escapeHtml(p.name)}</span> 
+                      <span class="tag" style="background:rgba(239,68,68,0.1);color:#ef4444">${p.stock} units left</span>
+                    </div>
+                  `).join('') || '<div class="empty" style="padding:10px;">Inventory optimal.</div>' }
                 </div>
-              `).join('') || '<div class="empty" style="padding:20px;">Inventory levels are optimal.</div>' }
+                <div class="box">
+                  <h3 style="margin-top:0;color:var(--primary);">Abandoned Carts</h3>
+                  <p class="muted" style="font-size:13px; margin-bottom:14px;">Detect and send recovery emails to customers who left items in their cart.</p>
+                  <button class="btn" style="width:100%;" onclick="triggerCartRecovery()"><i class="fa-solid fa-envelope"></i> Trigger Recovery Campaign</button>
+                </div>
             </div>
           </div>
         `;
@@ -1235,7 +1334,9 @@
     document.getElementById('loginBtn').addEventListener('click', doLogin);
     document.getElementById('registerBtn').addEventListener('click', doRegister);
     document.getElementById('saveProductBtn').addEventListener('click', saveProduct);
-    window.addEventListener('click', (e) => { if (e.target.classList.contains('modal') && e.target.id !== 'csvModal') e.target.classList.remove('show'); });
+    window.addEventListener('click', (e) => { 
+        if (e.target.classList.contains('modal') && e.target.id !== 'csvModal' && e.target.id !== 'reviewModal') e.target.classList.remove('show'); 
+    });
 
     async function init() {
       try {
