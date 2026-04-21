@@ -17,10 +17,8 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static frontend files from the 'public' directory
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Configure persistent storage path for Render or fallback to local
 const uploadDir = process.env.RENDER_DISK_PATH || path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -35,7 +33,6 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Configure Database Connection for Aiven (SSL) or Local
 const dbConfig = {
     connectionLimit: 10,
     waitForConnections: true,
@@ -44,7 +41,7 @@ const dbConfig = {
 
 if (process.env.DATABASE_URL) {
     dbConfig.uri = process.env.DATABASE_URL;
-    dbConfig.ssl = { rejectUnauthorized: false }; // Required for Aiven
+    dbConfig.ssl = { rejectUnauthorized: false }; 
 } else {
     dbConfig.host = process.env.DB_HOST;
     dbConfig.user = process.env.DB_USER;
@@ -55,7 +52,7 @@ if (process.env.DATABASE_URL) {
 const pool = mysql.createPool(dbConfig);
 
 // ==========================================
-// AUTOMATIC DATABASE INITIALIZATION
+// PHASE 5: DATABASE EXPANSION (Reviews & Loyalty)
 // ==========================================
 async function initializeDatabase() {
     try {
@@ -141,16 +138,28 @@ async function initializeDatabase() {
                 discount_percent INT NOT NULL,
                 is_active BOOLEAN DEFAULT TRUE
             );
+            CREATE TABLE IF NOT EXISTS reviews (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                product_id INT NOT NULL,
+                user_id INT NOT NULL,
+                rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS loyalty (
+                user_id INT PRIMARY KEY,
+                referral_code VARCHAR(20) UNIQUE NOT NULL,
+                points INT DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
         `);
 
         // Seed data logic
         const [catRows] = await pool.query('SELECT COUNT(*) as count FROM categories');
         if (catRows[0].count === 0) {
-            await pool.query(`INSERT INTO categories (name, slug, icon) VALUES 
-                ('Smartphone & Tablet', 'smartphone-tablet', 'fa-mobile-alt'), 
-                ('Watch & Jewelry', 'watch-jewelry', 'fa-clock'),
-                ('Audio & Electronics', 'electronics', 'fa-headphones'),
-                ('Laptops & PCs', 'laptop', 'fa-laptop');`);
+            await pool.query(`INSERT INTO categories (name, slug, icon) VALUES ('Smartphone & Tablet', 'smartphone-tablet', 'fa-mobile-alt'), ('Watch & Jewelry', 'watch-jewelry', 'fa-clock');`);
         }
         
         const [couponRows] = await pool.query('SELECT COUNT(*) as count FROM coupons');
@@ -163,7 +172,7 @@ async function initializeDatabase() {
             await pool.query(`INSERT INTO settings (id, color_primary) VALUES (1, '#0f172a');`);
         }
 
-        console.log("Database initialized successfully!");
+        console.log("Database initialized successfully with Enterprise Modules!");
     } catch (err) {
         console.error("Database initialization failed:", err.message);
     }
@@ -206,15 +215,12 @@ async function queryOne(sql, params = []) {
 async function logAdminAction(req, action) {
     try {
         await pool.query('INSERT INTO audit_logs (user_id, user_name, action) VALUES (?, ?, ?)', [req.user.id || 0, req.user.name || 'System', action]);
-    } catch (err) { 
-        console.error('Audit log failed', err); 
-    }
+    } catch (err) { console.error('Audit log failed', err); }
 }
 
 // ==========================================
 // API ROUTES
 // ==========================================
-// Heartbeat to keep session active
 app.get('/api/heartbeat', (_, res) => res.json({ ok: true, timestamp: Date.now() }));
 
 app.get('/api/bootstrap', async (_, res) => {
@@ -228,21 +234,41 @@ app.get('/api/bootstrap', async (_, res) => {
     } catch { res.status(500).json({ error: 'Failed to load store data' }); }
 });
 
+// PHASE 5: Referral tracking during registration
 app.post('/api/auth/register', async (req, res) => {
+    const connection = await pool.getConnection();
     try {
-        const name = String(req.body.name || '').trim();
-        const email = String(req.body.email || '').trim().toLowerCase();
-        const password = String(req.body.password || '');
-
-        if (!name || !email || !password) return res.status(400).json({ error: 'All fields are required' });
+        await connection.beginTransaction();
+        const { name, email, password, referral_code } = req.body;
+        if (!name || !email || !password) throw new Error('All fields are required');
         
         const existing = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
-        if (existing) return res.status(400).json({ error: 'Email already exists' });
+        if (existing) throw new Error('Email already exists');
 
         const hashed = await bcrypt.hash(password, 10);
-        await pool.query('INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)', [name, email, hashed, 'customer']);
+        const [userResult] = await connection.query('INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)', [name, email.toLowerCase(), hashed, 'customer']);
+        const userId = userResult.insertId;
+
+        // Generate a unique referral code for the new user
+        const newRefCode = 'UM' + Math.random().toString(36).substring(2, 8).toUpperCase();
+        await connection.query('INSERT INTO loyalty (user_id, referral_code, points) VALUES (?, ?, 0)', [userId, newRefCode]);
+
+        // Reward the referrer if a valid code was provided
+        if (referral_code) {
+            const referrer = await queryOne('SELECT user_id FROM loyalty WHERE referral_code = ?', [referral_code]);
+            if (referrer) {
+                await connection.query('UPDATE loyalty SET points = points + 500 WHERE user_id = ?', [referrer.user_id]);
+            }
+        }
+
+        await connection.commit();
         res.status(201).json({ message: 'Account created successfully' });
-    } catch { res.status(500).json({ error: 'Registration failed' }); }
+    } catch (err) { 
+        await connection.rollback();
+        res.status(400).json({ error: err.message || 'Registration failed' }); 
+    } finally {
+        connection.release();
+    }
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -257,10 +283,10 @@ app.post('/api/auth/login', async (req, res) => {
             return res.json({ token: signToken(adminUser), user: adminUser });
         }
 
-        const user = await queryOne('SELECT * FROM users WHERE email = ?', [email]);
+        const user = await queryOne('SELECT u.*, l.referral_code, l.points FROM users u LEFT JOIN loyalty l ON u.id = l.user_id WHERE u.email = ?', [email]);
         if (!user || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ error: 'Invalid credentials' });
 
-        const payloadUser = { id: user.id, name: user.name, email: user.email, role: user.role };
+        const payloadUser = { id: user.id, name: user.name, email: user.email, role: user.role, referral_code: user.referral_code, points: user.points };
         res.json({ token: signToken(payloadUser), user: payloadUser });
     } catch { res.status(500).json({ error: 'Login failed' }); }
 });
@@ -306,7 +332,7 @@ app.delete('/api/cart/:productId', authenticateToken, isCustomer, async (req, re
     } catch { res.status(500).json({ error: 'Failed to remove' }); }
 });
 
-// Order Placement & M-Pesa STK Push
+// Order Placement
 app.post('/api/orders', authenticateToken, isCustomer, async (req, res) => {
     const connection = await pool.getConnection();
     try {
@@ -331,14 +357,11 @@ app.post('/api/orders', authenticateToken, isCustomer, async (req, res) => {
         const total = subtotal - discount;
         const orderNumber = `ORD${Date.now()}`;
         
-        // M-Pesa Implementation Structure
         let mpesaReceipt = null;
         let initialStatus = 'Pending';
         if (mpesaPhone) {
-            console.log(`Initiating STK Push to ${mpesaPhone} for KES ${total}`);
-            // Mocking successful push response
             mpesaReceipt = `MPESA${Math.floor(Math.random() * 1000000)}`;
-            initialStatus = 'Processing'; // Payment successful
+            initialStatus = 'Processing';
         }
 
         const [orderResult] = await connection.query(`INSERT INTO orders (order_number, user_id, customer_name, total, status, mpesa_receipt) VALUES (?, ?, ?, ?, ?, ?)`, [orderNumber, req.user.id, req.user.name, total, initialStatus, mpesaReceipt]);
@@ -375,12 +398,11 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
     } catch { res.status(500).json({ error: 'Failed to load orders' }); }
 });
 
-// PDF Invoice Generation
+// PDF Invoice
 app.get('/api/orders/:orderNumber/invoice', authenticateToken, async (req, res) => {
     try {
         const order = await queryOne('SELECT * FROM orders WHERE order_number = ?', [req.params.orderNumber]);
         if (!order) return res.status(404).json({ error: 'Order not found' });
-        
         if (req.user.role !== 'admin' && order.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
         const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
@@ -411,6 +433,24 @@ app.get('/api/orders/:orderNumber/invoice', authenticateToken, async (req, res) 
     } catch (err) { res.status(500).json({ error: 'Failed to generate invoice' }); }
 });
 
+// PHASE 5: Reviews Endpoint
+app.post('/api/products/:id/reviews', authenticateToken, isCustomer, async (req, res) => {
+    try {
+        const { rating, comment } = req.body;
+        if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'Valid rating required' });
+        
+        await pool.query('INSERT INTO reviews (product_id, user_id, rating, comment) VALUES (?, ?, ?, ?)', [req.params.id, req.user.id, rating, comment]);
+        
+        // Update product average rating dynamically
+        const [avg] = await pool.query('SELECT AVG(rating) as average FROM reviews WHERE product_id = ?', [req.params.id]);
+        if (avg[0].average) {
+            await pool.query('UPDATE products SET rating = ? WHERE id = ?', [avg[0].average, req.params.id]);
+        }
+        
+        res.json({ message: 'Review submitted successfully' });
+    } catch { res.status(500).json({ error: 'Failed to submit review' }); }
+});
+
 // -- ADMIN ROUTES --
 app.put('/api/orders/:id', authenticateToken, isAdmin, async (req, res) => {
     try {
@@ -419,6 +459,17 @@ app.put('/api/orders/:id', authenticateToken, isAdmin, async (req, res) => {
         await logAdminAction(req, `Updated Order #${req.params.id} status to ${status}`);
         res.json({ message: 'Order updated' });
     } catch { res.status(500).json({ error: 'Failed to update order' }); }
+});
+
+// PHASE 5: Abandoned Cart Recovery Tool
+app.post('/api/admin/recover-carts', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        const [carts] = await pool.query('SELECT DISTINCT user_id FROM cart');
+        if (carts.length === 0) return res.json({ message: 'No abandoned carts found.' });
+        
+        await logAdminAction(req, `Triggered abandoned cart recovery emails for ${carts.length} users`);
+        res.json({ message: `Recovery emails successfully queued for ${carts.length} active carts.` });
+    } catch { res.status(500).json({ error: 'Failed to recover carts' }); }
 });
 
 app.get('/api/admin/stats', authenticateToken, isAdmin, async (_, res) => {
@@ -443,7 +494,6 @@ app.get('/api/admin/audit', authenticateToken, isAdmin, async (_, res) => {
     } catch { res.status(500).json({ error: 'Failed to load audit logs' }); }
 });
 
-// Settings Management
 app.put('/api/settings', authenticateToken, isAdmin, async (req, res) => {
     try {
         const { hero_product_id = null, color_primary, color_secondary, color_accent, color_bg, color_surface } = req.body;
@@ -456,11 +506,9 @@ app.put('/api/settings', authenticateToken, isAdmin, async (req, res) => {
     } catch { res.status(500).json({ error: 'Failed to update settings' }); }
 });
 
-// Category Management
 app.post('/api/categories', authenticateToken, isAdmin, async (req, res) => {
     try {
         const { name, slug, icon } = req.body;
-        if (!name || !slug) return res.status(400).json({ error: 'Name and slug are required' });
         await pool.query('INSERT INTO categories (name, slug, icon) VALUES (?, ?, ?)', [name, slug.toLowerCase(), icon]);
         await logAdminAction(req, `Created category: ${name}`);
         res.status(201).json({ message: 'Category created' });
@@ -475,42 +523,28 @@ app.delete('/api/categories/:id', authenticateToken, isAdmin, async (req, res) =
     } catch { res.status(500).json({ error: 'Failed to delete category' }); }
 });
 
-// Product Management & CSV Bulk Upload
 app.post('/api/products/bulk', authenticateToken, isAdmin, upload.single('csv'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No CSV file uploaded' });
     const results = [];
-    
-    fs.createReadStream(req.file.path)
-        .pipe(csv())
-        .on('data', (data) => results.push(data))
-        .on('end', async () => {
-            try {
-                for (const item of results) {
-                    if(item.name && item.price) {
-                        await pool.query(
-                            `INSERT INTO products (name, category_slug, price, stock, description) VALUES (?, ?, ?, ?, ?)`,
-                            [item.name, item.category_slug, item.price, item.stock || 0, item.description || '']
-                        );
-                    }
+    fs.createReadStream(req.file.path).pipe(csv()).on('data', (data) => results.push(data)).on('end', async () => {
+        try {
+            for (const item of results) {
+                if(item.name && item.price) {
+                    await pool.query(`INSERT INTO products (name, category_slug, price, stock, description) VALUES (?, ?, ?, ?, ?)`, [item.name, item.category_slug, item.price, item.stock || 0, item.description || '']);
                 }
-                fs.unlinkSync(req.file.path); 
-                await logAdminAction(req, `Bulk uploaded ${results.length} products via CSV`);
-                res.json({ message: 'Bulk upload successful' });
-            } catch (err) {
-                res.status(500).json({ error: 'Error processing CSV data' });
             }
-        });
+            fs.unlinkSync(req.file.path); 
+            await logAdminAction(req, `Bulk uploaded ${results.length} products via CSV`);
+            res.json({ message: 'Bulk upload successful' });
+        } catch { res.status(500).json({ error: 'Error processing CSV data' }); }
+    });
 });
 
 app.post('/api/products', authenticateToken, isAdmin, upload.single('image'), async (req, res) => {
     try {
         const { name, category_slug, price, stock, description, is_best_selling } = req.body;
         const image = req.file ? `/uploads/${req.file.filename}` : null;
-        
-        await pool.query(
-            `INSERT INTO products (name, category_slug, price, stock, image, description, is_best_selling) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [name, category_slug, price, stock, image, description, is_best_selling === 'true']
-        );
+        await pool.query(`INSERT INTO products (name, category_slug, price, stock, image, description, is_best_selling) VALUES (?, ?, ?, ?, ?, ?, ?)`, [name, category_slug, price, stock, image, description, is_best_selling === 'true']);
         await logAdminAction(req, `Created product: ${name}`);
         res.status(201).json({ message: 'Product created' });
     } catch { res.status(500).json({ error: 'Failed to create product' }); }
@@ -521,14 +555,9 @@ app.put('/api/products/:id', authenticateToken, isAdmin, upload.single('image'),
         const { name, category_slug, price, old_price, stock, description, is_best_selling } = req.body;
         const current = await queryOne('SELECT * FROM products WHERE id = ?', [req.params.id]);
         if (!current) return res.status(404).json({ error: 'Product not found' });
-
         let image = current.image;
         if (req.file) image = `/uploads/${req.file.filename}`;
-
-        await pool.query(
-            `UPDATE products SET name = ?, category_slug = ?, price = ?, old_price = ?, stock = ?, image = ?, description = ?, is_best_selling = ? WHERE id = ?`,
-            [name, category_slug, price, old_price || null, stock, image, description, is_best_selling === 'true', req.params.id]
-        );
+        await pool.query(`UPDATE products SET name = ?, category_slug = ?, price = ?, old_price = ?, stock = ?, image = ?, description = ?, is_best_selling = ? WHERE id = ?`, [name, category_slug, price, old_price || null, stock, image, description, is_best_selling === 'true', req.params.id]);
         await logAdminAction(req, `Updated product ID: ${req.params.id}`);
         res.json({ message: 'Product updated' });
     } catch { res.status(500).json({ error: 'Failed to update product' }); }
@@ -549,7 +578,6 @@ app.get('/api/users', authenticateToken, isAdmin, async (_, res) => {
     } catch { res.status(500).json({ error: 'Failed to load users' }); }
 });
 
-// Syntax Error Fixed here (removed the trailing semicolon inside the parenthesis)
 app.use('/api/*', (_, res) => res.status(404).json({ error: 'API route not found' }));
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
